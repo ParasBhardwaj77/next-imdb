@@ -4,73 +4,95 @@ import { createOrUpdateUser, deleteUser } from '@/lib/actions/user';
 import { clerkClient } from '@clerk/nextjs/server';
 
 export async function POST(req) {
-  const SIGNING_SECRET = process.env.SIGNING_SECRET;
+    const SIGNING_SECRET = process.env.SIGNING_SECRET;
 
-  if (!SIGNING_SECRET) {
-    throw new Error('Error: SIGNING_SECRET is missing in environment variables.');
-  }
+    if (!SIGNING_SECRET) {
+        throw new Error(
+            'Error: Please add SIGNING_SECRET from Clerk Dashboard to .env or .env.local'
+        );
+    }
 
-  const wh = new Webhook(SIGNING_SECRET);
+    // Create new Svix instance with secret
+    const wh = new Webhook(SIGNING_SECRET);
 
-  const headerPayload = await headers();
-  const svix_id = headerPayload.get('svix-id');
-  const svix_timestamp = headerPayload.get('svix-timestamp');
-  const svix_signature = headerPayload.get('svix-signature');
+    // Get headers
+    const headerPayload = await headers();
+    const svix_id = headerPayload.get('svix-id');
+    const svix_timestamp = headerPayload.get('svix-timestamp');
+    const svix_signature = headerPayload.get('svix-signature');
 
-  if (!svix_id || !svix_timestamp || !svix_signature) {
-    return new Response('Error: Missing Svix headers', { status: 400 });
-  }
+    // If there are no headers, error out
+    if (!svix_id || !svix_timestamp || !svix_signature) {
+        return new Response('Error: Missing Svix headers', {
+            status: 400,
+        });
+    }
 
-  const payload = await req.json();
-  const body = JSON.stringify(payload);
+    // Get body
+    const payload = await req.json();
+    const body = JSON.stringify(payload);
 
-  let evt;
-  try {
-    evt = wh.verify(body, {
-      'svix-id': svix_id,
-      'svix-timestamp': svix_timestamp,
-      'svix-signature': svix_signature,
-    });
-  } catch (err) {
-    console.error('Error verifying webhook:', err);
-    return new Response('Error: Verification error', { status: 400 });
-  }
+    let evt;
 
-  const { id } = evt?.data;
-  const eventType = evt?.type;
-
-  if (!id) {
-    return new Response('Error: No user ID found', { status: 400 });
-  }
-
-  if (eventType === 'user.created' || eventType === 'user.updated') {
-    const { first_name, last_name, image_url, email_addresses } = evt?.data;
+    // Verify payload with headers
     try {
-      const user = await createOrUpdateUser(id, first_name, last_name, image_url, email_addresses);
+        evt = wh.verify(body, {
+            'svix-id': svix_id,
+            'svix-timestamp': svix_timestamp,
+            'svix-signature': svix_signature,
+        });
+    } catch (err) {
+        console.error('Error: Could not verify webhook:', err);
+        return new Response('Error: Verification error', {
+            status: 400,
+        });
+    }
 
-      if (user && eventType === 'user.created') {
+    // Do something with payload
+    // For this guide, log payload to console
+    const { id } = evt?.data;
+    const eventType = evt?.type;
+
+    if (eventType === 'user.created' || eventType === 'user.updated') {
+        const { first_name, last_name, image_url, email_addresses } = evt?.data;
         try {
-          await clerkClient.users.updateUserMetadata(id, {
-            publicMetadata: { userMongoId: user._id },
-          });
+            const user = await createOrUpdateUser(
+                id,
+                first_name,
+                last_name,
+                image_url,
+                email_addresses
+            );
+            if (user && eventType === 'user.created') {
+                try {
+                    const client = await clerkClient();
+                    await client.users.updateUserMetadata(id, {
+                        publicMetadata: {
+                            userMongoId: user._id,
+                        },
+                    });
+                } catch (error) {
+                    console.log('Error: Could not update user metadata:', error);
+                }
+            }
         } catch (error) {
-          console.error('Error updating Clerk metadata:', error);
+            console.log('Error: Could not create or update user:', error);
+            return new Response('Error: Could not create or update user', {
+                status: 400,
+            });
         }
-      }
-    } catch (error) {
-      console.error('Error creating/updating user:', error);
-      return new Response('Error: Could not create or update user', { status: 400 });
     }
-  }
 
-  if (eventType === 'user.deleted') {
-    try {
-      await deleteUser(id);
-    } catch (error) {
-      console.error('Error deleting user:', error);
-      return new Response('Error: Could not delete user', { status: 400 });
+    if (eventType === 'user.deleted') {
+        try {
+            await deleteUser(id);
+        } catch (error) {
+            console.log('Error: Could not delete user:', error);
+            return new Response('Error: Could not delete user', {
+                status: 400,
+            });
+        }
     }
-  }
 
-  return new Response('Webhook received', { status: 200 });
+    return new Response('Webhook received', { status: 200 });
 }
